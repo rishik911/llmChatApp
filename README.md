@@ -1,6 +1,9 @@
 # LLM Chat App
 
-<video src="llm.webm" controls width="100%"></video>
+
+https://github.com/user-attachments/assets/ad7f83eb-85d9-4c74-a82d-adaa3e894b2e
+
+
 
 A React Native chat application that streams responses from Google Gemini in real time, with multi-conversation management and a typewriter rendering effect.
 

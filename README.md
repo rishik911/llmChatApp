@@ -1,97 +1,143 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# LLM Chat App
 
-# Getting Started
+<video src="llm.webm" controls width="100%"></video>
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+A React Native chat application that streams responses from Google Gemini in real time, with multi-conversation management and a typewriter rendering effect.
 
-## Step 1: Start Metro
+---
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+## What the app does
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+- Start multiple independent chat conversations with Gemini Flash.
+- Responses stream token-by-token via SSE (Server-Sent Events) and are rendered with a typewriter effect — characters are dripped out at a rate proportional to how full the buffer is, keeping the UI smooth without falling behind the network.
+- While a response is generating, a blinking cursor trails the text and three animated dots appear when the model hasn't produced any text yet ("thinking" state).
+- Each conversation is auto-titled from the first user message (up to 50 chars).
+- The conversation list shows a preview of the last message and a relative timestamp (e.g. "3m ago").
+- Any in-flight stream can be cancelled with the stop button; sending a new message while one is streaming cancels the previous one cleanly.
 
-```sh
-# Using npm
-npm start
+---
 
-# OR using Yarn
-yarn start
+## Folder structure
+
+```
+llmChatApp/
+├── App.tsx                         # Root component — screen routing & conversation state
+├── index.js                        # React Native entry point
+├── .env                            # GEMINI_API_KEY (loaded via react-native-dotenv)
+│
+├── src/
+│   ├── types.ts                    # Shared types: Message, Conversation
+│   ├── ChatScreen.tsx              # Active chat UI — orchestrates send/stop/stream
+│   │
+│   ├── screens/
+│   │   └── ConversationListScreen.tsx  # Home screen: list, create, delete conversations
+│   │
+│   ├── components/
+│   │   ├── ChatHeader.tsx          # Top bar with back button and conversation title
+│   │   ├── InputBar.tsx            # Text input + send/stop button
+│   │   ├── MessageList.tsx         # FlatList wrapper with auto-scroll-to-bottom
+│   │   ├── MessageBubble.tsx       # Single message bubble (user/assistant/error/thinking)
+│   │   └── BlinkingCursor.tsx      # Animated ▍ cursor shown while streaming
+│   │
+│   ├── hooks/
+│   │   ├── useConversations.ts     # In-memory CRUD for the conversations array
+│   │   └── useStreamBuffer.ts      # Typewriter engine: drips characters from a buffer
+│   │
+│   ├── network/
+│   │   ├── GeminiRepository.ts     # XHR-based SSE streaming to Gemini API
+│   │   └── types.ts                # ChatMessage, StreamCallbacks, StreamHandle
+│   │
+│   └── env.d.ts                    # Type declaration for @env (react-native-dotenv)
+│
+├── __tests__/
+│   └── App.test.tsx                # Smoke test
+│
+├── android/                        # Android native project
+├── ios/                            # iOS native project (Xcode workspace + CocoaPods)
+├── package.json
+└── tsconfig.json
 ```
 
-## Step 2: Build and run your app
+---
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
+## Code walkthrough
 
-### Android
+### `App.tsx` — root router
 
-```sh
-# Using npm
-npm run android
+Holds the full list of conversations in `useConversations` and a single `activeId` that determines which screen to show. When `activeId` is `null` the conversation list is shown; when set, `ChatScreen` is rendered with `key={activeId}` so React remounts it cleanly (resetting all local state and cancelling any in-flight streams) whenever the user switches conversations.
 
-# OR using Yarn
-yarn android
+```
+ConversationListScreen  ──onNew / onSelect──▶  ChatScreen (key = conv.id)
+                        ◀──────onBack──────────
 ```
 
-### iOS
+---
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+### `src/hooks/useConversations.ts` — conversation store
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+Plain `useState` array. Exposes `createConversation`, `updateMessages`, `updateTitle`, and `deleteConversation`. No persistence — state lives in memory for the session.
 
-```sh
-bundle install
-```
+---
 
-Then, and every time you update your native dependencies, run:
+### `src/network/GeminiRepository.ts` — streaming layer
 
-```sh
-bundle exec pod install
-```
+Calls the Gemini `streamGenerateContent` SSE endpoint using `XMLHttpRequest`. XHR was chosen over `fetch` because React Native's Hermes engine does not expose a usable `ReadableStream` from fetch responses, while XHR's `onprogress` fires incrementally and is a reliable streaming primitive on both iOS and Android.
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+Each `onprogress` event slices new bytes off `xhr.responseText`, splits by `\n`, and parses JSON from any `data: {...}` lines to extract the text token. The returned `StreamHandle` wraps `xhr.abort()` for clean cancellation.
 
-```sh
-# Using npm
-npm run ios
+---
 
-# OR using Yarn
-yarn ios
-```
+### `src/hooks/useStreamBuffer.ts` — typewriter engine
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+Decouples network speed from render speed. Incoming tokens are appended to a string buffer (`bufRef`). A `setInterval` running every 16 ms drips characters out of the front of the buffer:
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+| Buffer size | Chars per tick |
+|-------------|----------------|
+| ≤ 20        | 1              |
+| ≤ 80        | 3              |
+| > 80        | `ceil(len/25)` |
 
-## Step 3: Modify your app
+This keeps the animation smooth when the buffer is small and catches up quickly when the model is fast and the buffer grows large. When the network signals completion (`markNetworkDone`) and the buffer empties, the interval fires `onDone` and stops.
 
-Now that you have successfully run the app, let's make changes!
+---
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+### `src/ChatScreen.tsx` — chat orchestrator
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
+Owns the per-conversation message array, draft text, and streaming state. On send:
 
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
+1. Cancels any current stream and typewriter.
+2. Pushes a user message and an empty assistant message (marked `streaming: true`) into state.
+3. Calls `streamChat` from `GeminiRepository`, piping tokens into `useStreamBuffer.enqueue`.
+4. The typewriter drips characters into the assistant message via `setMessages` in `onChar`.
+5. On completion or error, the message is marked `streaming: false` and the parent is notified via `onMessagesChange`.
 
-## Congratulations! :tada:
+A `generationRef` counter guards against stale callbacks from a previous stream firing after a new send.
 
-You've successfully run and modified your React Native App. :partying_face:
+---
 
-### Now what?
+### `src/components/MessageBubble.tsx` — message rendering
 
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
+Three visual states:
+- **Thinking** (`streaming === true`, `content === ''`): three animated dots with staggered opacity pulses.
+- **Streaming** (`streaming === true`, `content !== ''`): text + blinking `▍` cursor.
+- **Done / Error**: plain text bubble, red tint on error.
 
-# Troubleshooting
+---
 
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
+## Setup
 
-# Learn More
+1. Install dependencies:
+   ```bash
+   npm install
+   cd ios && pod install
+   ```
 
-To learn more about React Native, take a look at the following resources:
+2. Add your Gemini API key to `.env`:
+   ```
+   GEMINI_API_KEY=your_key_here
+   ```
 
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+3. Run:
+   ```bash
+   npm run ios     # or npm run android
+   ```
